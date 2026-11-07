@@ -1,5 +1,6 @@
 package com.eventpass.dao;
 
+import com.eventpass.model.Roles;
 import com.eventpass.model.User;
 
 import java.sql.Connection;
@@ -12,31 +13,34 @@ import java.util.Locale;
 import java.util.Optional;
 
 public class UserDao {
+    private static final String SELECT_COLUMNS = "SELECT id, full_name, email, password, roles, status FROM users";
 
-    public boolean register(String username, String password, String role) throws SQLException {
-        String normalizedUsername = username.trim();
+    public boolean register(String fullName, String email, String password, String role) throws SQLException {
+        String normalizedName = fullName.trim();
+        String normalizedEmail = email.trim().toLowerCase(Locale.ROOT);
         String normalizedRole = role.trim().toUpperCase(Locale.ROOT);
 
-        if (normalizedUsername.isEmpty()) {
-            throw new IllegalArgumentException("Username cannot be empty.");
+        if (normalizedName.isEmpty()) {
+            throw new IllegalArgumentException("Full name cannot be empty.");
+        }
+        if (!normalizedEmail.contains("@") || normalizedEmail.startsWith("@") || normalizedEmail.endsWith("@")) {
+            throw new IllegalArgumentException("Please enter a valid email address.");
         }
         if (password == null || password.isEmpty()) {
             throw new IllegalArgumentException("Password cannot be empty.");
         }
-        if (!normalizedRole.equals("TEACHER") && !normalizedRole.equals("STUDENT")) {
-            throw new IllegalArgumentException("Role must be TEACHER or STUDENT.");
+        if (!Roles.SELF_REGISTER.contains(normalizedRole)) {
+            throw new IllegalArgumentException("Role must be STUDENT, ORGANIZER, or MONITOR.");
         }
 
-        String sql = """
-                INSERT INTO users (username, password, roles, status)
-                VALUES (?, ?, ?, 'PENDING')
-                """;
+        String sql = "INSERT INTO users (full_name, email, password, roles, status) VALUES (?, ?, ?, ?, 'PENDING')";
 
         try (Connection connection = DatabaseConnection.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, normalizedUsername);
-            statement.setString(2, PasswordUtil.hash(password));
-            statement.setString(3, normalizedRole);
+            statement.setString(1, normalizedName);
+            statement.setString(2, normalizedEmail);
+            statement.setString(3, PasswordUtil.hash(password));
+            statement.setString(4, normalizedRole);
             statement.executeUpdate();
             return true;
         } catch (SQLException e) {
@@ -47,62 +51,60 @@ public class UserDao {
         }
     }
 
-    public Optional<User> login(String username, String password) throws SQLException {
-        String sql = """
-                SELECT id, username, password, roles, status
-                FROM users
-                WHERE username = ?
-                """;
+    public Optional<User> login(String email, String password) throws SQLException {
+        String sql = SELECT_COLUMNS + " WHERE email = ?";
 
         try (Connection connection = DatabaseConnection.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, username.trim());
+            statement.setString(1, email.trim().toLowerCase(Locale.ROOT));
 
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next()) {
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) {
                     return Optional.empty();
                 }
-
-                String storedHash = resultSet.getString("password");
+                String storedHash = rs.getString("password");
                 if (!PasswordUtil.verify(password, storedHash)) {
                     return Optional.empty();
                 }
-
-                User user = new User(
-                        resultSet.getInt("id"),
-                        resultSet.getString("username"),
-                        storedHash,
-                        resultSet.getString("roles"),
-                        resultSet.getString("status")
-                );
-                return Optional.of(user);
+                return Optional.of(mapUser(rs));
             }
         }
     }
 
     /** Returns every registered account regardless of role or status. */
     public List<User> getAllUsers() throws SQLException {
-        String sql = "SELECT id, username, password, roles, status FROM users ORDER BY id";
-        return queryUsers(sql, null);
+        return queryUsers(SELECT_COLUMNS + " ORDER BY id", null);
     }
 
     /** Returns every account (all roles) whose status is PENDING. */
     public List<User> getPendingUsers() throws SQLException {
-        String sql = "SELECT id, username, password, roles, status FROM users WHERE status = ? ORDER BY id";
-        return queryUsers(sql, "PENDING");
+        return queryUsers(SELECT_COLUMNS + " WHERE status = ? ORDER BY id", "PENDING");
     }
 
-    /**
-     * Changes a PENDING account to APPROVED.
-     *
-     * @return true if exactly one pending account was updated
-     */
+    /** Changes an account's status to APPROVED. */
     public boolean approveUser(int userId) throws SQLException {
         String sql = "UPDATE users SET status = 'APPROVED' WHERE id = ?";
         try (Connection connection = DatabaseConnection.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, userId);
             return statement.executeUpdate() > 0;
+        }
+    }
+
+    /**
+     * Updates the role and status of one user account.
+     * Both values are converted to upper case before they are saved.
+     *
+     * @return true if exactly one user row was updated, false if no user has that id
+     */
+    public boolean updateUserRoleAndStatus(int userId, String newRole, String newStatus) throws SQLException {
+        String sql = "UPDATE users SET roles = ?, status = ? WHERE id = ?";
+        try (Connection connection = DatabaseConnection.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, newRole.trim().toUpperCase(Locale.ROOT));
+            statement.setString(2, newStatus.trim().toUpperCase(Locale.ROOT));
+            statement.setInt(3, userId);
+            return statement.executeUpdate() == 1;
         }
     }
 
@@ -115,15 +117,20 @@ public class UserDao {
             }
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
-                    users.add(new User(
-                            rs.getInt("id"),
-                            rs.getString("username"),
-                            rs.getString("password"),
-                            rs.getString("roles"),
-                            rs.getString("status")));
+                    users.add(mapUser(rs));
                 }
             }
         }
         return users;
+    }
+
+    private User mapUser(ResultSet rs) throws SQLException {
+        return new User(
+                rs.getInt("id"),
+                rs.getString("full_name"),
+                rs.getString("email"),
+                rs.getString("password"),
+                rs.getString("roles"),
+                rs.getString("status"));
     }
 }

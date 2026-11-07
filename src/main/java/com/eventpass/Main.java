@@ -1,5 +1,6 @@
 package com.eventpass;
 
+import com.eventpass.dao.ActivityLogDao;
 import com.eventpass.dao.DatabaseInitializer;
 import com.eventpass.dao.UserDao;
 import com.eventpass.ui.Authentication;
@@ -7,7 +8,9 @@ import com.eventpass.ui.Authentication;
 import java.sql.SQLException;
 import java.util.Scanner;
 
-public final class Main {
+public final class Move-Item eventpass.db eventpass_backup.db
+git pull origin mainMove-Item eventpass.db eventpass_backup.db
+git pull origin mainMain {
     private Main() {
     }
 
@@ -18,10 +21,11 @@ public final class Main {
 
             // 2. Create shared instances for the application's UI.
             UserDao userDao = new UserDao();
+            ActivityLogDao activityLogDao = new ActivityLogDao();
             Scanner scanner = new Scanner(System.in);
 
             // 3. Delegate registration, login, and role routing.
-            new Authentication(userDao, scanner).start();
+            new Authentication(userDao, activityLogDao, scanner).start();
         } catch (SQLException e) {
             System.err.println("Unable to initialize EventPass database: " + e.getMessage());
         }

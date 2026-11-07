@@ -7,76 +7,112 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 /**
- * Creates (and, if needed, upgrades) the database schema before the menu starts.
- * Foreign keys are enabled for every connection by {@link DatabaseConnection}.
+ * Creates the five EventPass tables from the system proposal / ERD:
+ * users, events, registrations, attendance_logs and activity_logs.
  */
 public final class DatabaseInitializer {
-    public static final String DEFAULT_ADMIN_USERNAME = "admin";
+    public static final String DEFAULT_ADMIN_NAME = "System Admin";
+    public static final String DEFAULT_ADMIN_EMAIL = "admin@eventpass.com";
     public static final String DEFAULT_ADMIN_PASSWORD = "admin123";
+
+    private static final String CREATE_USERS = """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                roles TEXT NOT NULL CHECK (roles IN ('STUDENT', 'ORGANIZER', 'MONITOR', 'ADMIN')),
+                status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('APPROVED', 'PENDING'))
+            )
+            """;
+
+    private static final String CREATE_EVENTS = """
+            CREATE TABLE IF NOT EXISTS events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                organizer_id INTEGER NOT NULL,
+                event_title TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                event_date TIMESTAMP NOT NULL,
+                max_capacity INTEGER NOT NULL CHECK (max_capacity > 0),
+                FOREIGN KEY (organizer_id) REFERENCES users(id)
+            )
+            """;
+
+    private static final String CREATE_REGISTRATIONS = """
+            CREATE TABLE IF NOT EXISTS registrations (
+                registration_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                student_id INTEGER NOT NULL,
+                registration_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL DEFAULT 'REGISTERED',
+                UNIQUE (event_id, student_id),
+                FOREIGN KEY (event_id) REFERENCES events(event_id),
+                FOREIGN KEY (student_id) REFERENCES users(id)
+            )
+            """;
+
+    private static final String CREATE_ATTENDANCE_LOGS = """
+            CREATE TABLE IF NOT EXISTS attendance_logs (
+                attendance_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                registration_id INTEGER NOT NULL UNIQUE,
+                monitor_id INTEGER NOT NULL,
+                check_in_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                arrival_status TEXT NOT NULL DEFAULT 'ON_TIME',
+                FOREIGN KEY (registration_id) REFERENCES registrations(registration_id),
+                FOREIGN KEY (monitor_id) REFERENCES users(id)
+            )
+            """;
+
+    private static final String CREATE_ACTIVITY_LOGS = """
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                activity_type TEXT NOT NULL,
+                activity_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                details TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """;
 
     private DatabaseInitializer() {
     }
 
     public static void initialize() throws SQLException {
-        String createUsersTable = """
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL UNIQUE,
-                    password TEXT NOT NULL,
-                    roles TEXT NOT NULL CHECK (roles IN ('ADMIN', 'TEACHER', 'STUDENT')),
-                    status TEXT NOT NULL DEFAULT 'PENDING'
-                )
-                """;
-
         try (Connection connection = DatabaseConnection.getConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute(createUsersTable);
-            upgradeRoleConstraintIfNeeded(connection);
+            dropOldSchemaIfNeeded(connection);
+            statement.execute(CREATE_USERS);
+            statement.execute(CREATE_EVENTS);
+            statement.execute(CREATE_REGISTRATIONS);
+            statement.execute(CREATE_ATTENDANCE_LOGS);
+            statement.execute(CREATE_ACTIVITY_LOGS);
             seedDefaultAdmin(connection);
         }
     }
 
-    /** Older databases only allowed TEACHER/STUDENT; rebuild the table so ADMIN is allowed. */
-    private static void upgradeRoleConstraintIfNeeded(Connection connection) throws SQLException {
-        String tableSql = null;
+    /**
+     * An older eventpass.db (username-based users table) cannot be used with the proposal's schema,
+     * so it is dropped and recreated. Only runs when the users table exists without a full_name column.
+     */
+    private static void dropOldSchemaIfNeeded(Connection connection) throws SQLException {
+        boolean usersExists = false;
+        boolean hasFullName = false;
         try (Statement st = connection.createStatement();
-             ResultSet rs = st.executeQuery("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'")) {
-            if (rs.next()) {
-                tableSql = rs.getString(1);
+             ResultSet rs = st.executeQuery("PRAGMA table_info(users)")) {
+            while (rs.next()) {
+                usersExists = true;
+                if ("full_name".equalsIgnoreCase(rs.getString("name"))) {
+                    hasFullName = true;
+                }
             }
         }
-        if (tableSql == null || tableSql.contains("'ADMIN'")) {
-            return;
-        }
-
-        // Foreign keys must be switched off outside a transaction while the table is rebuilt.
-        try (Statement pragma = connection.createStatement()) {
-            pragma.execute("PRAGMA foreign_keys = OFF;");
-        }
-        boolean originalAutoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
-        try (Statement st = connection.createStatement()) {
-            st.execute("""
-                    CREATE TABLE users_new (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT NOT NULL UNIQUE,
-                        password TEXT NOT NULL,
-                        roles TEXT NOT NULL CHECK (roles IN ('ADMIN', 'TEACHER', 'STUDENT')),
-                        status TEXT NOT NULL DEFAULT 'PENDING'
-                    )
-                    """);
-            st.execute("INSERT INTO users_new (id, username, password, roles, status) "
-                    + "SELECT id, username, password, roles, status FROM users");
-            st.execute("DROP TABLE users");
-            st.execute("ALTER TABLE users_new RENAME TO users");
-            connection.commit();
-        } catch (SQLException e) {
-            connection.rollback();
-            throw e;
-        } finally {
-            connection.setAutoCommit(originalAutoCommit);
-            try (Statement pragma = connection.createStatement()) {
-                pragma.execute("PRAGMA foreign_keys = ON;");
+        if (usersExists && !hasFullName) {
+            try (Statement st = connection.createStatement()) {
+                st.execute("DROP TABLE IF EXISTS attendance_logs");
+                st.execute("DROP TABLE IF EXISTS registrations");
+                st.execute("DROP TABLE IF EXISTS events");
+                st.execute("DROP TABLE IF EXISTS activity_logs");
+                st.execute("DROP TABLE IF EXISTS users");
             }
         }
     }
@@ -92,12 +128,13 @@ public final class DatabaseInitializer {
                 }
             }
         }
-        String insertSql = "INSERT OR IGNORE INTO users (username, password, roles, status) VALUES (?, ?, ?, ?)";
+        String insertSql = "INSERT OR IGNORE INTO users (full_name, email, password, roles, status) VALUES (?, ?, ?, ?, ?)";
         try (PreparedStatement insert = connection.prepareStatement(insertSql)) {
-            insert.setString(1, DEFAULT_ADMIN_USERNAME);
-            insert.setString(2, PasswordUtil.hash(DEFAULT_ADMIN_PASSWORD));
-            insert.setString(3, "ADMIN");
-            insert.setString(4, "APPROVED");
+            insert.setString(1, DEFAULT_ADMIN_NAME);
+            insert.setString(2, DEFAULT_ADMIN_EMAIL);
+            insert.setString(3, PasswordUtil.hash(DEFAULT_ADMIN_PASSWORD));
+            insert.setString(4, "ADMIN");
+            insert.setString(5, "APPROVED");
             insert.executeUpdate();
         }
     }
