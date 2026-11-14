@@ -7,6 +7,7 @@ import com.eventpass.model.Roles;
 import com.eventpass.model.User;
 
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Scanner;
@@ -14,7 +15,7 @@ import java.util.Set;
 
 /**
  * Student Affairs Admin console menu: list users, list pending registrations, approve accounts,
- * update a user's role and status, and review the activity / audit log.
+ * update a user's role and status, and review / filter / clear the system audit log.
  */
 public class AdminMenu {
     private static final Set<String> VALID_STATUSES = Set.of("APPROVED", "PENDING");
@@ -42,7 +43,7 @@ public class AdminMenu {
             System.out.println("2. View Pending Registrations");
             System.out.println("3. Approve User Account");
             System.out.println("4. Update User Role & Status");
-            System.out.println("5. View Activity / Audit Logs");
+            System.out.println("5. View System Audit Logs");
             System.out.println("6. Logout");
             System.out.println("7. Exit Application");
             System.out.print("Choose an option: ");
@@ -52,7 +53,7 @@ public class AdminMenu {
                 case "2" -> viewPendingUsers();
                 case "3" -> approveUser(admin);
                 case "4" -> updateUser(admin);
-                case "5" -> viewActivityLogs();
+                case "5" -> auditLogMenu(admin);
                 case "6" -> {
                     System.out.println("You have been logged out.");
                     return false;
@@ -106,11 +107,10 @@ public class AdminMenu {
                     continue;
                 }
 
-                if (userDao.approveUser(userId)) {
+                // UserDao.approveUser also writes the USER_APPROVED audit entry.
+                if (userDao.approveUser(admin.id(), userId)) {
                     System.out.println("SUCCESS: Account '" + target.fullName() + "' (ID " + userId
                             + ", role " + target.role() + ") has been APPROVED.");
-                    logQuietly(admin.id(), "USER_APPROVED",
-                            "Approved user ID " + userId + " (" + target.email() + ").");
                 } else {
                     System.out.println("Approval failed. The account may have changed; please try again.");
                 }
@@ -171,12 +171,10 @@ public class AdminMenu {
                 return;
             }
 
-            if (userDao.updateUserRoleAndStatus(target.id(), newRole, newStatus)) {
+            // UserDao.updateUserRoleAndStatus also writes the USER_UPDATED audit entry.
+            if (userDao.updateUserRoleAndStatus(currentAdmin.id(), target.id(), newRole, newStatus)) {
                 System.out.println("SUCCESS: User '" + target.fullName() + "' (ID " + target.id()
                         + ") updated to role " + newRole + " and status " + newStatus + ".");
-                logQuietly(currentAdmin.id(), "USER_UPDATED",
-                        "Changed user ID " + target.id() + " from " + target.role() + "/" + target.status()
-                                + " to " + newRole + "/" + newStatus + ".");
             } else {
                 System.out.println("Update failed. The account may no longer exist.");
             }
@@ -185,41 +183,131 @@ public class AdminMenu {
         }
     }
 
-    private void viewActivityLogs() {
-        try {
-            List<ActivityLog> logs = activityLogDao.getAll();
-            System.out.println("\n=== ACTIVITY / AUDIT LOGS (newest first) ===");
-            String row = "| %-5s | %-7s | %-14s | %-19s | %-40s |%n";
-            String border = "+" + "-".repeat(7) + "+" + "-".repeat(9) + "+" + "-".repeat(16) + "+"
-                    + "-".repeat(21) + "+" + "-".repeat(42) + "+";
-            System.out.println(border);
-            System.out.printf(row, "ID", "USER ID", "ACTIVITY", "TIMESTAMP", "DETAILS");
-            System.out.println(border);
-            if (logs.isEmpty()) {
-                System.out.printf("| %-96s |%n", "No activity recorded yet.");
-            }
-            for (ActivityLog l : logs) {
-                String details = l.details() == null ? "" : l.details();
-                if (details.length() > 40) {
-                    details = details.substring(0, 37) + "...";
+    // ---------------------------------------------------------------- audit log interface
+
+    private static final String LOG_ROW = "%-5s | %-8s | %-18s | %-35s | %-20s%n";
+    private static final int LOG_DESCRIPTION_WIDTH = 35;
+
+    /** Sub-menu for the audit trail: view all, filter by user, or clear history. */
+    private void auditLogMenu(User admin) {
+        while (true) {
+            System.out.println("\n--- SYSTEM AUDIT LOGS ---");
+            System.out.println("1. View All System Logs");
+            System.out.println("2. Filter Logs by User ID");
+            System.out.println("3. Clear Historical Logs");
+            System.out.println("0. Back to Admin Menu");
+            System.out.print("Choose an option: ");
+
+            switch (scanner.nextLine().trim()) {
+                case "1" -> viewAllLogs();
+                case "2" -> filterLogsByUser();
+                case "3" -> clearLogs(admin);
+                case "0" -> {
+                    return;
                 }
-                System.out.printf(row, l.activityId(), l.userId() == null ? "-" : l.userId(),
-                        l.activityType(), l.activityTimestamp(), details);
+                default -> System.out.println("Invalid option. Please choose 0-3.");
             }
-            System.out.println(border);
-            System.out.println("Total: " + logs.size());
-        } catch (SQLException e) {
-            System.out.println("Database error while loading activity logs: " + e.getMessage());
         }
     }
 
-    /** Writes an audit entry without letting a logging problem undo a successful action. */
-    private void logQuietly(int userId, String type, String details) {
+    private void viewAllLogs() {
         try {
-            activityLogDao.log(userId, type, details);
+            System.out.println("\n=== SYSTEM AUDIT LOGS (newest first) ===");
+            printLogTable(activityLogDao.getAllLogs());
         } catch (SQLException e) {
-            System.out.println("Warning: could not write the activity log: " + e.getMessage());
+            System.out.println("Database error while loading audit logs: " + e.getMessage());
         }
+    }
+
+    private void filterLogsByUser() {
+        int userId = readIntInput("Enter User ID to filter by (0 to cancel): ");
+        if (userId == 0) {
+            return;
+        }
+        try {
+            System.out.println("\n=== AUDIT LOGS FOR USER ID " + userId + " (newest first) ===");
+            printLogTable(activityLogDao.getLogsByUserId(userId));
+        } catch (SQLException e) {
+            System.out.println("Database error while loading audit logs: " + e.getMessage());
+        }
+    }
+
+    /** Deletes all history only after the admin types CLEAR; the clearing itself is then logged. */
+    private void clearLogs(User admin) {
+        try {
+            int count = activityLogDao.getAllLogs().size();
+            if (count == 0) {
+                System.out.println("There are no audit logs to clear.");
+                return;
+            }
+            System.out.println("WARNING: This permanently deletes all " + count + " audit log entries.");
+            System.out.print("Type CLEAR to confirm (anything else cancels): ");
+            if (!scanner.nextLine().trim().equals("CLEAR")) {
+                System.out.println("Clear cancelled. No logs were deleted.");
+                return;
+            }
+            int deleted = activityLogDao.clearAllLogs(admin.id());
+            System.out.println("SUCCESS: " + deleted + " audit log entries deleted. "
+                    + "This action was recorded as LOGS_CLEARED.");
+        } catch (SQLException e) {
+            System.out.println("Database error while clearing audit logs: " + e.getMessage());
+        }
+    }
+
+    /** Prints logs as an aligned console table; long descriptions wrap onto extra lines. */
+    private static void printLogTable(List<ActivityLog> logs) {
+        String divider = "-".repeat(5 + 3 + 8 + 3 + 18 + 3 + LOG_DESCRIPTION_WIDTH + 3 + 20);
+        System.out.println(divider);
+        System.out.printf(LOG_ROW, "ID", "USER ID", "ACTION TYPE", "DESCRIPTION", "TIMESTAMP");
+        System.out.println(divider);
+        if (logs.isEmpty()) {
+            System.out.println("No log entries found.");
+        }
+        for (ActivityLog log : logs) {
+            List<String> lines = wrap(log.description(), LOG_DESCRIPTION_WIDTH);
+            System.out.printf(LOG_ROW, log.id(), log.userId(), fit(log.actionType(), 18),
+                    lines.get(0), log.timestamp());
+            for (int i = 1; i < lines.size(); i++) {
+                System.out.printf(LOG_ROW, "", "", "", lines.get(i), "");
+            }
+        }
+        System.out.println(divider);
+        System.out.println("Total: " + logs.size());
+    }
+
+    /** Splits text into lines of at most {@code width} characters, breaking on spaces where possible. */
+    private static List<String> wrap(String text, int width) {
+        List<String> lines = new ArrayList<>();
+        StringBuilder line = new StringBuilder();
+        for (String word : (text == null ? "" : text).split("\\s+")) {
+            while (word.length() > width) {            // a single very long word: hard split
+                if (line.length() > 0) {
+                    lines.add(line.toString());
+                    line.setLength(0);
+                }
+                lines.add(word.substring(0, width));
+                word = word.substring(width);
+            }
+            if (line.length() > 0 && line.length() + 1 + word.length() > width) {
+                lines.add(line.toString());
+                line.setLength(0);
+            }
+            if (line.length() > 0) {
+                line.append(' ');
+            }
+            line.append(word);
+        }
+        if (line.length() > 0 || lines.isEmpty()) {
+            lines.add(line.toString());
+        }
+        return lines;
+    }
+
+    private static String fit(String text, int width) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() <= width ? text : text.substring(0, width - 3) + "...";
     }
 
     /** Keeps asking until the admin types a whole number, so letters/symbols never crash the app. */

@@ -1,5 +1,6 @@
 package com.eventpass.dao;
 
+import com.eventpass.model.ActionType;
 import com.eventpass.model.Roles;
 import com.eventpass.model.User;
 
@@ -81,30 +82,65 @@ public class UserDao {
         return queryUsers(SELECT_COLUMNS + " WHERE status = ? ORDER BY id", "PENDING");
     }
 
-    /** Changes an account's status to APPROVED. */
-    public boolean approveUser(int userId) throws SQLException {
+    /**
+     * Changes an account's status to APPROVED and records USER_APPROVED in the audit trail
+     * (same transaction, so either both are saved or neither is).
+     *
+     * @param adminId the admin performing the approval
+     * @param userId  the account being approved
+     */
+    public boolean approveUser(int adminId, int userId) throws SQLException {
         String sql = "UPDATE users SET status = 'APPROVED' WHERE id = ?";
-        try (Connection connection = DatabaseConnection.getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setInt(1, userId);
-            return statement.executeUpdate() > 0;
+        try (Connection connection = DatabaseConnection.getConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setInt(1, userId);
+                if (statement.executeUpdate() == 0) {
+                    connection.rollback();
+                    return false;
+                }
+                ActivityLogDao.insert(connection, adminId, ActionType.USER_APPROVED,
+                        "Admin " + adminId + " approved account for User ID " + userId + ".");
+                connection.commit();
+                return true;
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            }
         }
     }
 
     /**
-     * Updates the role and status of one user account.
-     * Both values are converted to upper case before they are saved.
+     * Updates the role and status of one user account and records USER_UPDATED in the audit trail
+     * (same transaction). Both values are converted to upper case before they are saved.
      *
+     * @param adminId the admin performing the change
      * @return true if exactly one user row was updated, false if no user has that id
      */
-    public boolean updateUserRoleAndStatus(int userId, String newRole, String newStatus) throws SQLException {
+    public boolean updateUserRoleAndStatus(int adminId, int userId, String newRole, String newStatus)
+            throws SQLException {
+        String role = newRole.trim().toUpperCase(Locale.ROOT);
+        String status = newStatus.trim().toUpperCase(Locale.ROOT);
         String sql = "UPDATE users SET roles = ?, status = ? WHERE id = ?";
-        try (Connection connection = DatabaseConnection.getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, newRole.trim().toUpperCase(Locale.ROOT));
-            statement.setString(2, newStatus.trim().toUpperCase(Locale.ROOT));
-            statement.setInt(3, userId);
-            return statement.executeUpdate() == 1;
+        try (Connection connection = DatabaseConnection.getConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, role);
+                statement.setString(2, status);
+                statement.setInt(3, userId);
+                if (statement.executeUpdate() != 1) {
+                    connection.rollback();
+                    return false;
+                }
+                ActivityLogDao.insert(connection, adminId, ActionType.USER_UPDATED,
+                        "Admin " + adminId + " changed role of User " + userId + " to " + role
+                                + " and status to " + status + ".");
+                connection.commit();
+                return true;
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            }
         }
     }
 

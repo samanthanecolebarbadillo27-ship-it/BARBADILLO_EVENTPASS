@@ -65,12 +65,12 @@ public final class DatabaseInitializer {
 
     private static final String CREATE_ACTIVITY_LOGS = """
             CREATE TABLE IF NOT EXISTS activity_logs (
-                activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                activity_type TEXT NOT NULL,
-                activity_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                details TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(id)
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                timestamp TIMESTAMP NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """;
 
@@ -85,6 +85,7 @@ public final class DatabaseInitializer {
             statement.execute(CREATE_EVENTS);
             statement.execute(CREATE_REGISTRATIONS);
             statement.execute(CREATE_ATTENDANCE_LOGS);
+            migrateLegacyActivityLogs(connection);
             statement.execute(CREATE_ACTIVITY_LOGS);
             seedDefaultAdmin(connection);
         }
@@ -114,6 +115,43 @@ public final class DatabaseInitializer {
                 st.execute("DROP TABLE IF EXISTS activity_logs");
                 st.execute("DROP TABLE IF EXISTS users");
             }
+        }
+    }
+
+    /**
+     * Earlier versions stored the audit trail as activity_logs(activity_id, user_id, activity_type,
+     * activity_timestamp, details). If that layout is found, its rows are copied into the current
+     * (id, user_id, action_type, description, timestamp) table so no history is lost.
+     */
+    private static void migrateLegacyActivityLogs(Connection connection) throws SQLException {
+        boolean legacy = false;
+        try (Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(activity_logs)")) {
+            while (rs.next()) {
+                if ("activity_id".equalsIgnoreCase(rs.getString("name"))) {
+                    legacy = true;
+                }
+            }
+        }
+        if (!legacy) {
+            return;
+        }
+
+        connection.setAutoCommit(false);
+        try (Statement st = connection.createStatement()) {
+            st.execute("ALTER TABLE activity_logs RENAME TO activity_logs_legacy");
+            st.execute(CREATE_ACTIVITY_LOGS);
+            st.execute("INSERT INTO activity_logs (user_id, action_type, description, timestamp) "
+                    + "SELECT user_id, activity_type, COALESCE(details, ''), activity_timestamp "
+                    + "FROM activity_logs_legacy "
+                    + "WHERE user_id IN (SELECT id FROM users) ORDER BY activity_id");
+            st.execute("DROP TABLE activity_logs_legacy");
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
         }
     }
 

@@ -1,7 +1,11 @@
 package com.eventpass.ui;
 
 import com.eventpass.dao.ActivityLogDao;
+import com.eventpass.dao.AttendanceDao;
+import com.eventpass.dao.EventDao;
+import com.eventpass.dao.RegistrationDao;
 import com.eventpass.dao.UserDao;
+import com.eventpass.model.ActionType;
 import com.eventpass.model.Roles;
 import com.eventpass.model.User;
 
@@ -16,12 +20,19 @@ import java.util.Scanner;
 public class Authentication {
     private final UserDao userDao;
     private final ActivityLogDao activityLogDao;
+    private final EventDao eventDao;
+    private final RegistrationDao registrationDao;
+    private final AttendanceDao attendanceDao;
     private final Scanner scanner;
     private boolean running = true;
 
-    public Authentication(UserDao userDao, ActivityLogDao activityLogDao, Scanner scanner) {
+    public Authentication(UserDao userDao, ActivityLogDao activityLogDao, EventDao eventDao,
+                          RegistrationDao registrationDao, AttendanceDao attendanceDao, Scanner scanner) {
         this.userDao = userDao;
         this.activityLogDao = activityLogDao;
+        this.eventDao = eventDao;
+        this.registrationDao = registrationDao;
+        this.attendanceDao = attendanceDao;
         this.scanner = scanner;
     }
 
@@ -106,11 +117,8 @@ public class Authentication {
             }
 
             User user = result.get();
-            try {
-                activityLogDao.log(user.id(), "USER_LOGIN", "User " + user.email() + " logged in.");
-            } catch (SQLException e) {
-                System.out.println("Warning: could not write the activity log: " + e.getMessage());
-            }
+            logQuietly(user.id(), ActionType.USER_LOGIN,
+                    "User " + user.email() + " (ID: " + user.id() + ") logged in.");
             System.out.println("Login successful. Welcome, " + user.fullName() + "!");
             System.out.println("Role: " + user.role() + " (" + Roles.displayName(user.role()) + ")");
             System.out.println("Account status: " + user.status());
@@ -123,24 +131,41 @@ public class Authentication {
         }
     }
 
+    /**
+     * Opens the menu for the user's role. Admins and APPROVED users get their full menu; accounts
+     * that are still PENDING only get the limited menu. When the menu closes, the logout is audited.
+     */
     private void routeToRoleMenu(User user) {
+        boolean approved = "APPROVED".equalsIgnoreCase(user.status());
+        boolean exitApp;
         switch (user.role().toUpperCase()) {
-            case Roles.ADMIN -> {
-                if (new AdminMenu(userDao, activityLogDao, scanner).show(user)) {
-                    running = false;
-                }
+            case Roles.ADMIN -> exitApp = new AdminMenu(userDao, activityLogDao, scanner).show(user);
+            case Roles.ORGANIZER -> exitApp = approved
+                    ? new OrganizerMenu(eventDao, registrationDao, scanner).show(user)
+                    : limitedMenu(user, "EVENT ORGANIZER MENU");
+            case Roles.MONITOR -> exitApp = approved
+                    ? new MonitorMenu(eventDao, registrationDao, attendanceDao, scanner).show(user)
+                    : limitedMenu(user, "GATE MONITOR MENU");
+            case Roles.STUDENT -> exitApp = approved
+                    ? new StudentMenu(eventDao, registrationDao, scanner).show(user)
+                    : limitedMenu(user, "STUDENT ATTENDEE MENU");
+            default -> {
+                System.out.println("No menu is configured for role: " + user.role());
+                return;
             }
-            case Roles.ORGANIZER -> roleMenu(user, "EVENT ORGANIZER MENU");
-            case Roles.MONITOR -> roleMenu(user, "GATE MONITOR MENU");
-            case Roles.STUDENT -> roleMenu(user, "STUDENT ATTENDEE MENU");
-            default -> System.out.println("No menu is configured for role: " + user.role());
+        }
+
+        logQuietly(user.id(), ActionType.USER_LOGOUT, "User " + user.email() + " (ID: " + user.id()
+                + ") logged out" + (exitApp ? " (application exit)." : "."));
+        if (exitApp) {
+            running = false;
         }
     }
 
-    private void roleMenu(User user, String title) {
-        boolean inMenu = true;
-        while (inMenu && running) {
-            System.out.println("\n--- " + title + " ---");
+    /** Menu for accounts that are not approved yet. @return true if the user chose to exit the application */
+    private boolean limitedMenu(User user, String title) {
+        while (true) {
+            System.out.println("\n--- " + title + " (PENDING APPROVAL) ---");
             System.out.println("Signed in as: " + user.fullName());
             System.out.println("1. View Account Details");
             System.out.println("2. Logout");
@@ -156,16 +181,24 @@ public class Authentication {
                     System.out.println("Status: " + user.status());
                 }
                 case "2" -> {
-                    inMenu = false;
                     System.out.println("You have been logged out.");
+                    return false;
                 }
                 case "3" -> {
-                    inMenu = false;
-                    running = false;
                     System.out.println("Exiting EventPass. Goodbye!");
+                    return true;
                 }
                 default -> System.out.println("Invalid option. Please choose 1, 2, or 3.");
             }
+        }
+    }
+
+    /** Writes an audit entry without letting a logging problem break the user's session. */
+    private void logQuietly(int userId, String actionType, String description) {
+        try {
+            activityLogDao.logAction(userId, actionType, description);
+        } catch (SQLException e) {
+            System.out.println("Warning: could not write the activity log: " + e.getMessage());
         }
     }
 }
